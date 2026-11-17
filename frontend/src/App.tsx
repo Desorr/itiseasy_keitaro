@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
-import { ApiError, request } from './api'
+import { ApiError, loadAvailableOffers, request } from './api'
+import CampaignEditor from './CampaignEditor'
 import { countryCodes } from './countries'
 import type { Campaign, CampaignInput, Offer } from './api'
 
@@ -43,6 +44,7 @@ export default function App() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [showForm, setShowForm] = useState(true)
+  const [editing, setEditing] = useState(false)
   const [loadingCampaigns, setLoadingCampaigns] = useState(true)
   const [campaignsError, setCampaignsError] = useState('')
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -54,7 +56,7 @@ export default function App() {
     setLoadingCampaigns(true)
     setCampaignsError('')
     try {
-      const data = await request<Campaign[]>('/api/campaigns', { signal })
+      const data = await request<Campaign[]>('/api/campaigns/sync', { method: 'POST', signal })
       if (signal?.aborted) return
       setCampaigns(data)
       setConfirmingDelete(false)
@@ -68,11 +70,17 @@ export default function App() {
           setError('')
           clearPending()
         } else {
-          setError('Кампания пока не найдена. Проверьте результат в Keitaro перед новым созданием.')
+          setError('Campaign not found yet. Check Keitaro before creating another campaign.')
         }
       }
     } catch (error) {
-      if (!signal?.aborted) setCampaignsError(error instanceof Error ? error.message : 'Не удалось загрузить кампании.')
+      if (!signal?.aborted) {
+        setCampaignsError(error instanceof Error ? error.message : 'Failed to load campaigns.')
+        try {
+          const cached = await request<Campaign[]>('/api/campaigns', { signal })
+          if (!signal?.aborted) setCampaigns(cached)
+        } catch { /* Keep the synchronization error. */ }
+      }
     } finally { if (!signal?.aborted) setLoadingCampaigns(false) }
   }
 
@@ -86,9 +94,9 @@ export default function App() {
     const controller = new AbortController()
     request<{ configured: boolean; missing_configuration: string[] }>('/api/health', { signal: controller.signal })
       .then((health) => {
-        if (!health.configured) setConfigurationError(`Настройте backend: ${health.missing_configuration.join(', ')}.`)
+        if (!health.configured) setConfigurationError(`Configure the backend: ${health.missing_configuration.join(', ')}.`)
       }).catch((error: unknown) => {
-        if (!controller.signal.aborted) setConfigurationError(error instanceof Error ? error.message : 'Backend недоступен.')
+        if (!controller.signal.aborted) setConfigurationError(error instanceof Error ? error.message : 'Backend unavailable.')
       })
     return () => controller.abort()
   }, [])
@@ -107,13 +115,13 @@ export default function App() {
     setLoadingOffers(true)
     setOfferError('')
     try {
-      offersRequest.current ??= request<Offer[]>('/api/offers')
+      offersRequest.current ??= loadAvailableOffers()
       const data = await offersRequest.current
       setAllOffers(data)
       setActiveIndex(-1)
     } catch (error) {
       offersRequest.current = null
-      setOfferError(error instanceof Error ? error.message : 'Ошибка загрузки офферов. Выберите поле ещё раз, чтобы повторить.')
+      setOfferError(error instanceof Error ? error.message : 'Failed to load offers. Focus the field again to retry.')
     } finally { setLoadingOffers(false) }
   }
 
@@ -150,13 +158,13 @@ export default function App() {
     const offerId = selectedOffer?.id || 0
     const geoCode = geo.trim().toUpperCase()
     const errors: Partial<Record<keyof CampaignInput, string>> = {}
-    if (!name.trim()) errors.name = 'Введите название кампании.'
-    else if ([...name.trim()].length < 5) errors.name = 'Название должно содержать не меньше 5 символов.'
-    else if ([...name.trim()].length > 255) errors.name = 'Название должно содержать не больше 255 символов.'
-    else if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) errors.name = 'Название содержит недопустимые управляющие символы.'
-    if (geoCode && /[^A-Z]/.test(geoCode)) errors.geo_code = 'GEO-код поддерживает только буквы A–Z.'
-    else if (!countryCodes.has(geoCode)) errors.geo_code = 'Укажите один существующий код страны: например, DE.'
-    if (!selectedOffer) errors.offer_id = 'Выберите оффер из выпадающего списка. Ввод используется только для поиска.'
+    if (!name.trim()) errors.name = 'Enter a campaign name.'
+    else if ([...name.trim()].length < 5) errors.name = 'The name must contain at least 5 characters.'
+    else if ([...name.trim()].length > 255) errors.name = 'The name must contain no more than 255 characters.'
+    else if (/[\u0000-\u001f\u007f-\u009f]/u.test(name)) errors.name = 'The name contains invalid control characters.'
+    if (geoCode && /[^A-Z]/.test(geoCode)) errors.geo_code = 'The GEO code supports only letters A–Z.'
+    else if (!countryCodes.has(geoCode)) errors.geo_code = 'Enter one valid country code, for example DE.'
+    if (!selectedOffer) errors.offer_id = 'Select an offer from the dropdown. Typing is only used for search.'
     setError('')
     setFieldErrors(errors)
     if (Object.keys(errors).length) {
@@ -169,7 +177,7 @@ export default function App() {
     try { availableOffers ??= await offersRequest.current } catch { /* loadOffers displays the error. */ }
     if (!availableOffers || !availableOffers.some((offer) => offer.id === offerId)) {
       setBusy(false)
-      setFieldErrors({ offer_id: availableOffers ? 'Оффер с таким ID отсутствует в списке доступных.' : 'Не удалось проверить оффер. Повторите загрузку списка.' })
+      setFieldErrors({ offer_id: availableOffers ? 'This offer ID is not in the available offers list.' : 'Failed to verify the offer. Reload the list.' })
       document.getElementById('offer')?.focus()
       return
     }
@@ -196,7 +204,7 @@ export default function App() {
         setRequestId(null)
         clearPending()
       }
-      setError(error instanceof Error ? error.message : 'Соединение прервано. Обновите список кампаний перед новым созданием.')
+      setError(error instanceof Error ? error.message : 'Connection interrupted. Refresh the campaign list before creating another campaign.')
     } finally { setBusy(false) }
   }
 
@@ -210,6 +218,7 @@ export default function App() {
     setSelectedOffer(null)
     setFocused(false)
     setShowForm(true)
+    setEditing(false)
     setConfirmingDelete(false)
     clearPending()
   }
@@ -224,30 +233,37 @@ export default function App() {
       setCampaigns((current) => current.filter((item) => item.id !== campaign.id))
       setSelectedId(null)
       setConfirmingDelete(false)
+      setName('')
+      setGeo('')
+      setOfferText('')
+      setSelectedOffer(null)
+      setFieldErrors({})
+      setFocused(false)
+      setActiveIndex(-1)
       if (requestId && campaign.alias === `tm_${requestId.replaceAll('-', '').slice(0, 16)}`) {
         setRequestId(null)
         clearPending()
       }
     } catch (error) {
       setConfirmingDelete(false)
-      setError(error instanceof Error ? error.message : 'Не удалось удалить кампанию. Обновите список и проверьте результат.')
+      setError(error instanceof Error ? error.message : 'Failed to archive the campaign. Refresh the list and check the result.')
     } finally { setBusy(false) }
   }
 
   return (
     <main className="with-campaigns">
       <aside className="campaign-sidebar">
-        <h2>Мои кампании</h2>
+        <h2>My campaigns</h2>
         <button type="button" className="secondary refresh-campaigns" disabled={busy || loadingCampaigns}
-          onClick={() => void loadCampaigns()}>Обновить</button>
-        {loadingCampaigns && <p className="muted" role="status">Загружаем кампании…</p>}
+          onClick={() => void loadCampaigns()}>Refresh</button>
+        {loadingCampaigns && <p className="muted" role="status">Loading campaigns…</p>}
         {campaignsError && <p className="notice error" role="alert">{campaignsError}</p>}
-        <nav aria-label="Мои кампании">
+        <nav aria-label="My campaigns">
           {campaigns.map((campaign) => <button key={campaign.id} type="button"
             className={`campaign-item ${!creating && selectedCampaign?.id === campaign.id ? 'selected' : ''}`}
             aria-current={!creating && selectedCampaign?.id === campaign.id ? 'page' : undefined}
             disabled={busy || loadingCampaigns}
-            onClick={() => { setSelectedId(campaign.id); setShowForm(false); setError(''); setConfirmingDelete(false) }}>
+            onClick={() => { setSelectedId(campaign.id); setShowForm(false); setEditing(false); setError(''); setConfirmingDelete(false) }}>
             <span>{campaign.name}</span>
             <small>ID {campaign.id}</small>
           </button>)}
@@ -255,25 +271,25 @@ export default function App() {
       </aside>
       <div className="campaign-content">
         <header className="page-header">
-          <h1>{creating ? 'Создание кампании' : selectedCampaign.name}</h1>
+          <h1>{creating ? 'Create campaign' : `${editing ? 'Editing: ' : ''}${selectedCampaign.name}`}</h1>
         </header>
         {configurationError && <p className="notice error" role="alert">{configurationError}</p>}
         {creating && <form onSubmit={submit} noValidate>
-        <label htmlFor="campaign-name">Название кампании</label>
+        <label htmlFor="campaign-name">Campaign name</label>
         <input id="campaign-name" value={name} onChange={(event) => { setName(event.target.value); clearFieldError('name') }}
           aria-invalid={Boolean(fieldErrors.name)} aria-describedby={fieldErrors.name ? 'name-error' : undefined}
-          required maxLength={255} disabled={locked} placeholder="Пример: test_фамилия_campaign1" />
+          required maxLength={255} disabled={locked} placeholder="Example: test_secondname_campaign1" />
 
         {fieldErrors.name && <small id="name-error" className="field-error" role="alert">{fieldErrors.name}</small>}
 
-        <label htmlFor="geo">GEO-коды стран</label>
+        <label htmlFor="geo">Country GEO code</label>
         <input id="geo" value={geo} onChange={(event) => { setGeo(event.target.value.toUpperCase()); clearFieldError('geo_code') }}
           aria-invalid={Boolean(fieldErrors.geo_code)} aria-describedby={fieldErrors.geo_code ? 'geo-error' : undefined}
           required maxLength={2} pattern="[A-Za-z]{2}" disabled={locked} placeholder="DE, AU, BY, ..." />
 
         {fieldErrors.geo_code && <small id="geo-error" className="field-error" role="alert">{fieldErrors.geo_code}</small>}
 
-        <label htmlFor="offer">ID оффера</label>
+        <label htmlFor="offer">Offer ID</label>
         <div className="offer-picker" onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false)
         }}>
@@ -282,12 +298,12 @@ export default function App() {
             value={offerText} onChange={(event) => { setOfferText(event.target.value.replace(/[^0-9]/g, '')); setSelectedOffer(null); clearFieldError('offer_id'); setFocused(true); setActiveIndex(-1) }}
             onFocus={() => { setFocused(true); void loadOffers() }} onKeyDown={handleOfferKey}
             aria-invalid={Boolean(fieldErrors.offer_id)} aria-describedby={fieldErrors.offer_id ? 'offer-error' : undefined}
-            required disabled={locked} placeholder="Введите ID оффера" inputMode="numeric" autoComplete="off" />
+            required disabled={locked} placeholder="Enter offer ID" inputMode="numeric" autoComplete="off" />
           {focused && !locked && <div className="suggestions">
-            {loadingOffers && <p role="status">Загружаем офферы…</p>}
+            {loadingOffers && <p role="status">Loading offers…</p>}
             {offerError && <p role="alert">{offerError}</p>}
-            {!loadingOffers && !offerError && offers.length === 0 && <p>Офферы не найдены.</p>}
-            <div id="offer-list" role="listbox" aria-label="Доступные офферы">
+            {!loadingOffers && !offerError && offers.length === 0 && <p>No offers found.</p>}
+            <div id="offer-list" role="listbox" aria-label="Available offers">
               {offers.map((offer, index) => <button key={offer.id} id={`offer-${offer.id}`} type="button" role="option"
                 aria-selected={selectedOffer?.id === offer.id || activeIndex === index} className={activeIndex === index ? 'active' : ''}
                 onPointerDown={(event) => {
@@ -305,38 +321,47 @@ export default function App() {
         {error && <p className="notice error" role="alert">{error}</p>}
           <div className="actions">
             <button type="submit" disabled={locked || Boolean(configurationError)}>
-              {busy ? 'Создаём…' : 'Создать кампанию'}
+              {busy ? 'Creating…' : 'Create campaign'}
             </button>
             {requestId && !busy && <>
-              <button type="button" className="secondary" disabled={loadingCampaigns} onClick={() => void loadCampaigns()}>Обновить список кампаний</button>
-              <button type="button" className="secondary" onClick={reset}>Новая кампания</button>
+              <button type="button" className="secondary" disabled={loadingCampaigns} onClick={() => void loadCampaigns()}>Refresh campaign list</button>
+              <button type="button" className="secondary" onClick={reset}>New campaign</button>
             </>}
           </div>
         </form>}
-        {!creating && <section className={`result ${selectedCampaign.state === 'active' ? 'succeeded' : ''}`}>
-          <h2>{selectedCampaign.state === 'active' ? 'Кампания активна' : 'Кампания выключена'}</h2>
-          <p>ID кампании: <strong>{selectedCampaign.id}</strong></p>
-          {selectedCampaign.state !== 'active' && <p>Проверьте конфигурацию кампании в Keitaro перед активацией.</p>}
-          <p className="muted">GEO: {selectedCampaign.geo_code || '—'} · Оффер: {selectedCampaign.offer_id || '—'}</p>
+        {!creating && editing && <CampaignEditor key={selectedCampaign.id} campaignId={selectedCampaign.id}
+          onBusy={setBusy} onBack={() => {
+            setEditing(false)
+            void request<Campaign[]>('/api/campaigns').then(setCampaigns).catch((error: unknown) => {
+              setCampaignsError(error instanceof Error ? error.message : 'Failed to refresh campaign details.')
+            })
+          }} />}
+        {!creating && !editing && <section className={`result ${selectedCampaign.state === 'active' ? 'succeeded' : ''}`}>
+          <h2>{selectedCampaign.state === 'active' ? 'Campaign active' : 'Campaign disabled'}</h2>
+          <p>Campaign ID: <strong>{selectedCampaign.id}</strong></p>
+          {selectedCampaign.state !== 'active' && <p>Check the campaign configuration in Keitaro before enabling it.</p>}
+          <p className="muted">GEO: {selectedCampaign.geo_code || '—'} · Offers: {selectedCampaign.offer_ids.join(', ') || '—'}</p>
           {fieldErrors.offer_id && <small id="offer-error" className="field-error" role="alert">{fieldErrors.offer_id}</small>}
         {error && <p className="notice error" role="alert">{error}</p>}
           <div className="actions">
+            <button type="button" disabled={busy || loadingCampaigns}
+              onClick={() => { setEditing(true); setError('') }}>Edit</button>
             <button type="button" className="danger" disabled={busy || loadingCampaigns}
-              onClick={() => { setConfirmingDelete(true); setError('') }}>Удалить кампанию</button>
+              onClick={() => { setConfirmingDelete(true); setError('') }}>Delete campaign</button>
           </div>
-          <dialog id="delete-campaign-dialog" className="delete-dialog" aria-label="Удаление кампании"
+          <dialog id="delete-campaign-dialog" className="delete-dialog" aria-label="Delete campaign"
             onCancel={(event) => { event.preventDefault(); if (!busy) setConfirmingDelete(false) }}>
             <div className="actions">
               <button type="button" className="danger" disabled={busy} onClick={() => void deleteCampaign()}>
-                {busy ? 'Удаляем…' : 'Удалить'}
+                {busy ? 'Deleting…' : 'Remove'}
               </button>
-              <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmingDelete(false)}>Отмена</button>
+              <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmingDelete(false)}>Cancel</button>
             </div>
           </dialog>
         </section>}
       </div>
-      {!creating && <button type="button" className="create-campaign" disabled={busy || loadingCampaigns}
-        onClick={reset}>Добавить кампанию</button>}
+      {!creating && !editing && <button type="button" className="create-campaign" disabled={busy || loadingCampaigns}
+        onClick={reset}>Add campaign</button>}
     </main>
   )
 }

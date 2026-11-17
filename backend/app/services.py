@@ -8,8 +8,6 @@ from .keitaro import KeitaroClient, KeitaroError
 from .schemas import CampaignCreate, CampaignDeleteRead, CampaignRead
 
 GOOGLE_URL = "https://google.com"
-GOOGLE_STREAM_NAME = "GEO: Google"
-OFFER_STREAM_NAME = "Offer"
 UNIQUENESS_METHOD = "ip_ua"
 CAMPAIGN_GROUP_NAME = "test_markovskiy_group"
 
@@ -21,7 +19,7 @@ class CampaignService:
 
     def _require_key(self) -> None:
         if not self.settings.keitaro_api_key.get_secret_value():
-            raise KeitaroError("configuration_missing", "Укажите API-ключ в .env.", http_status=503)
+            raise KeitaroError("configuration_missing", "Set the API key in .env.", http_status=503)
 
     @staticmethod
     def _managed(campaign: dict[str, Any]) -> bool:
@@ -55,9 +53,9 @@ class CampaignService:
             archived = await self.client.get_list("campaigns/deleted")
             campaign = next((item for item in archived if item.get("id") == campaign_id), None)
         if campaign is None:
-            return CampaignDeleteRead(campaign_id=campaign_id, message="Кампания уже отсутствует в Keitaro.")
+            return CampaignDeleteRead(campaign_id=campaign_id, message="The campaign no longer exists in Keitaro.")
         if not self._managed(campaign):
-            raise KeitaroError("campaign_not_found", "Кампания не найдена среди кампаний приложения.", http_status=404)
+            raise KeitaroError("campaign_not_found", "Campaign not found among the application campaigns.", http_status=404)
         if campaign.get("state") != "deleted":
             try:
                 await self.client.archive_campaign(campaign_id)
@@ -74,7 +72,7 @@ class CampaignService:
                 remaining = await self._campaign_or_none(campaign_id)
                 if remaining is not None and remaining.get("state") != "deleted":
                     raise KeitaroError(
-                        "campaign_delete_unconfirmed", "Keitaro не подтвердил удаление кампании.", uncertain=True,
+                        "campaign_delete_unconfirmed", "Keitaro did not confirm campaign archival.", uncertain=True,
                     )
 
         # Keep the shared group even when its last campaign is archived.
@@ -109,18 +107,22 @@ class CampaignService:
                 "parameters": parameters,
             })
             campaign_id = campaign["id"]
-            await self.client.create("streams", {
-                "campaign_id": campaign_id, "name": GOOGLE_STREAM_NAME, "type": "regular", "position": 1,
-                "schema": "redirect", "action_type": "http", "action_payload": GOOGLE_URL,
-                "state": "active", "collect_clicks": True, "filter_or": False,
-                "filters": [{"name": "country", "mode": "accept", "payload": payload.geo_codes}],
-            })
-            await self.client.create("streams", {
-                "campaign_id": campaign_id, "name": OFFER_STREAM_NAME, "type": "regular", "position": 2,
-                "schema": "landings", "action_type": "http", "state": "active", "collect_clicks": True,
-                "filters": [], "landings": [],
-                "offers": [{"offer_id": payload.offer_id, "share": 100, "state": "active"}],
-            })
+            flow_settings = [
+                {
+                    "schema": "redirect", "action_payload": GOOGLE_URL, "filter_or": False,
+                    "filters": [{"name": "country", "mode": "accept", "payload": payload.geo_codes}],
+                },
+                {
+                    "schema": "landings", "filters": [], "landings": [],
+                    "offers": [{"offer_id": payload.offer_id, "share": 100, "state": "active"}],
+                },
+            ]
+            for position, flow in enumerate(flow_settings, start=1):
+                await self.client.create("streams", {
+                    "campaign_id": campaign_id, "name": f"Flow {position}", "position": position,
+                    "type": "regular", "action_type": "http", "state": "active", "collect_clicks": True,
+                    **flow,
+                })
             await self._verify(campaign_id, alias, payload, expected_state="disabled", binding=binding, domains=[domain])
             await self.client.request("POST", f"campaigns/{campaign_id}/enable")
             result = await self._verify(campaign_id, alias, payload, expected_state="active", binding=binding, domains=[domain])
@@ -140,9 +142,9 @@ class CampaignService:
                     pass
             error.campaign_id = campaign_id
             if campaign_id is not None:
-                error.message += f" Кампания ID {campaign_id} могла быть создана частично. Проверьте её в Keitaro."
+                error.message += f" Campaign ID {campaign_id} may have been partially created. Check it in Keitaro."
             elif error.uncertain:
-                error.message += " Результат неизвестен. Обновите список кампаний перед новым созданием."
+                error.message += " The result is unknown. Refresh campaigns before creating another campaign."
             raise
 
     async def _read(
@@ -161,8 +163,8 @@ class CampaignService:
             }
             if query:
                 tracking_url += "?" + urlencode(query, safe="{}")
-        google = next((item for item in streams if item.get("name") == GOOGLE_STREAM_NAME), {})
-        offer = next((item for item in streams if item.get("name") == OFFER_STREAM_NAME), {})
+        google = next((item for item in streams if item.get("position") == 1 and item.get("schema") == "redirect"), {})
+        offer = next((item for item in streams if item.get("position") == 2 and item.get("schema") == "landings"), {})
         countries = next((item.get("payload") for item in (google.get("filters") or [])
                           if item.get("name") == "country" and item.get("mode") == "accept"), None)
         offers = offer.get("offers") or []
@@ -170,6 +172,10 @@ class CampaignService:
             id=campaign["id"], name=campaign["name"], alias=campaign["alias"], state=campaign["state"],
             geo_code=", ".join(countries) if isinstance(countries, list) and countries else None,
             offer_id=offers[0].get("offer_id") if len(offers) == 1 else None,
+            offer_ids=list(dict.fromkeys(
+                entry["offer_id"] for stream in streams for entry in (stream.get("offers") or [])
+                if entry.get("state", "active") == "active"
+            )),
             google_stream_id=google.get("id"), offer_stream_id=offer.get("id"),
             domain_id=campaign.get("domain_id"), group_id=campaign.get("group_id"),
             traffic_source_id=campaign.get("traffic_source_id"),
@@ -180,20 +186,20 @@ class CampaignService:
         self._require_key()
         offer = await self.client.get_object(f"offers/{payload.offer_id}")
         if offer.get("state") != "active":
-            raise KeitaroError("offer_inactive", "Выбранный оффер неактивен.", http_status=422)
+            raise KeitaroError("offer_inactive", "The selected offer is inactive.", http_status=422)
 
         def first_available(items: list[dict[str, Any]], label: str) -> dict[str, Any]:
             item = next((item for item in items if item.get("state", "active") == "active"), None)
             if item is None:
                 raise KeitaroError(
-                    "configuration_missing", f"{label}: нет доступных объектов в Keitaro.", http_status=422
+                    "configuration_missing", f"{label}: no available objects in Keitaro.", http_status=422
                 )
             if not isinstance(item.get("id"), int) or item["id"] <= 0:
-                raise KeitaroError("keitaro_invalid_response", f"{label}: Keitaro вернул некорректный ID.")
+                raise KeitaroError("keitaro_invalid_response", f"{label}: Keitaro returned an invalid ID.")
             return item
 
-        domain = first_available(await self.client.get_list("domains"), "Домен")
-        source = first_available(await self.client.get_list("traffic_sources"), "Источник трафика")
+        domain = first_available(await self.client.get_list("domains"), "Domain")
+        source = first_available(await self.client.get_list("traffic_sources"), "Traffic source")
         self._domain_url(domain)
         return domain, source
 
@@ -219,14 +225,14 @@ class CampaignService:
                         return group
                 except KeitaroError:
                     pass
-            error.message = "Не удалось создать группу кампании. " + error.message
+            error.message = "Failed to create the campaign group. " + error.message
             raise
 
     @staticmethod
     def _source_parameters(source: dict[str, Any]) -> dict[str, Any]:
         parameters = source.get("parameters") or {}
         if not isinstance(parameters, dict):
-            raise KeitaroError("keitaro_invalid_response", "Некорректные параметры источника.")
+            raise KeitaroError("keitaro_invalid_response", "Invalid traffic source parameters.")
         return {
             key: {field: value[field] for field in ("name", "placeholder", "alias") if field in value}
             for key, value in parameters.items()
@@ -281,7 +287,7 @@ class CampaignService:
             )
         if not valid:
             raise KeitaroError(
-                "configuration_mismatch", "Сохранённая конфигурация Keitaro не соответствует запросу."
+                "configuration_mismatch", "The saved Keitaro configuration does not match the request."
             )
 
         return await self._read(campaign, streams=streams, domains=domains)
@@ -294,7 +300,7 @@ class CampaignService:
         parts = urlsplit(name)
         if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password:
             raise KeitaroError(
-                "configuration_invalid", "Некорректный адрес домена кампании.", http_status=503
+                "configuration_invalid", "Invalid campaign domain URL.", http_status=503
             )
         return urlunsplit((parts.scheme, parts.netloc, "", "", ""))
 

@@ -56,3 +56,31 @@ a { color: #285fbd; }
 .delete-dialog { border: 1px solid #ddd; border-radius: 8px; padding: 20px; max-width: calc(100vw - 32px); box-shadow: 0 12px 40px #0003; }
 .delete-dialog::backdrop { background: #0005; }
 .delete-dialog .actions { margin-top: 0; justify-content: center; }
+
+.campaign-editor { margin-top: 24px; }
+.editor-toolbar { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+.stream-card { border: 1px solid #ddd; border-radius: 6px; padding: 18px; margin-bottom: 20px; }
+.stream-card.dirty { background: #fffbe6; border-color: #ddc15a; }
+.stream-card h2 { overflow-wrap: anywhere; }
+.stream-card h2 small { display: inline; font-size: 13px; font-weight: normal; }
+.stream-actions { margin: 12px 0; }
+.stream-offers { list-style: none; padding: 0; margin: 12px 0 0; }
+.stream-offers li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 14px 0; border-bottom: 1px solid #ddd; }
+.stream-offer-name { overflow-wrap: anywhere; }
+.stream-offers .removed .stream-offer-name, .stream-offers .removed .stream-offer-share { color: #777; }
+.stream-offers .removed { background: #eee9; }
+.stream-offer-share { display: grid; justify-items: center; gap: 6px; }
+.pin { font-size: 12px; padding: 4px 6px; }
+.pin.pinned { background: #e4edff; color: #1b478e; border-color: #285fbd; }
+.editor-add-offer { display: flex; gap: 12px; align-items: flex-start; margin-top: 16px; }
+.editor-add-offer .offer-picker { flex: 1; min-width: 0; }
+.editor-add-offer label { margin-top: 0; }
+.editor-add-offer > button { margin-top: 30px; }
+@media (max-width: 700px) {
+  .stream-card { padding: 12px; }
+  .stream-offers li { grid-template-columns: minmax(0, 1fr) auto; }
+  .stream-offers li > button { grid-column: 1 / -1; justify-self: end; }
+  .editor-add-offer { flex-wrap: wrap; }
+  .editor-add-offer > button { margin-top: 0; }
+  .editor-add-offer .offer-picker { flex-basis: 100%; }
+}

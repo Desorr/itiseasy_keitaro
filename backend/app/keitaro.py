@@ -42,14 +42,14 @@ class KeitaroClient:
         if not isinstance(fields, dict):
             return None
         labels = {
-            "name": "Название группы" if group else "Название кампании", "alias": "Адрес кампании",
-            "domain_id": "Домен", "group_id": "Группа", "traffic_source_id": "Источник",
-            "type": "Тип группы" if group else "Тип кампании", "state": "Состояние", "campaign_id": "Кампания",
-            "offer_id": "Оффер", "filters": "Фильтры", "offers": "Офферы",
+            "name": "Group name" if group else "Campaign name", "alias": "Campaign alias",
+            "domain_id": "Domain", "group_id": "Group", "traffic_source_id": "Traffic source",
+            "type": "Group type" if group else "Campaign type", "state": "State", "campaign_id": "Campaign",
+            "offer_id": "Offer", "filters": "Filters", "offers": "Offers",
         }
         messages = []
         key = self.client.headers.get("Api-Key", "")
-        entity = "Группа" if group else "Кампания"
+        entity = "Group" if group else "Campaign"
         for field, label in labels.items():
             errors = fields.get(field)
             errors = [errors] if isinstance(errors, str) else errors
@@ -58,19 +58,19 @@ class KeitaroClient:
             for error in errors[:3]:
                 if not isinstance(error, str):
                     continue
-                error = error.replace(key, "[скрыто]") if key else error
+                error = error.replace(key, "[redacted]") if key else error
                 text = " ".join(error.split())[:300]
                 if field == "name" and "already been used in the archive" in text.casefold():
-                    return f"{entity} с таким названием уже есть в архиве Keitaro. Укажите другое название."
+                    return f"A {entity} with this name already exists in the Keitaro archive. Use another name."
                 if field == "name" and any(
                     phrase in text.casefold() for phrase in ("already been used", "already exists", "already been taken")
                 ):
-                    return f"{entity} с таким названием уже существует в Keitaro. Укажите другое название."
+                    return f"A {entity} with this name already exists in Keitaro. Use another name."
                 messages.append(f"{label}: {text}")
         if not messages:
             return None
-        message = "Keitaro не принял данные. " + " ".join(messages)
-        return (message.replace(key, "[скрыто]") if key else message)[:1200]
+        message = "Keitaro rejected the data. " + " ".join(messages)
+        return (message.replace(key, "[redacted]") if key else message)[:1200]
 
     async def request(self, method: str, path: str, *, allow_empty: bool = False, **kwargs: Any) -> Any:
         mutating = method != "GET"
@@ -80,7 +80,7 @@ class KeitaroClient:
             logger.warning("Keitaro timeout: %s %s", method, path.split("?")[0])
             raise KeitaroError(
                 "keitaro_timeout",
-                "Keitaro не ответил вовремя.",
+                "Keitaro timed out.",
                 http_status=504,
                 uncertain=mutating,
             ) from None
@@ -88,7 +88,7 @@ class KeitaroClient:
             logger.warning("Keitaro connection error: %s %s", method, path.split("?")[0])
             raise KeitaroError(
                 "keitaro_unavailable",
-                "Не удалось подключиться к Keitaro.",
+                "Failed to connect to Keitaro.",
                 uncertain=mutating,
             ) from None
 
@@ -100,24 +100,24 @@ class KeitaroClient:
         if not response.is_success:
             logger.warning("Keitaro HTTP %s: %s %s", response.status_code, method, path.split("?")[0])
             if isinstance(data, dict) and data.get("error_code") == 1010:
-                raise KeitaroError("cloudflare_blocked", "Cloudflare блокирует доступ к API Keitaro.")
+                raise KeitaroError("cloudflare_blocked", "Cloudflare is blocking access to the Keitaro API.")
             errors = {
-                400: ("keitaro_validation", "Keitaro отклонил параметры запроса."),
-                401: ("keitaro_unauthorized", "Keitaro не принял API-ключ."),
-                402: ("keitaro_api_unavailable", "Admin API недоступен в текущей лицензии Keitaro."),
-                403: ("keitaro_forbidden", "Недостаточно прав для выполнения запроса к Keitaro."),
-                404: ("keitaro_not_found", "Объект не найден в Keitaro."),
-                406: ("keitaro_validation", "Keitaro не принял параметры объекта."),
-                422: ("keitaro_validation", "Keitaro не принял данные. Проверьте переданные поля."),
-                429: ("keitaro_rate_limit", "Слишком много запросов к Keitaro. Попробуйте позже."),
+                400: ("keitaro_validation", "Keitaro rejected the request parameters."),
+                401: ("keitaro_unauthorized", "Keitaro rejected the API key."),
+                402: ("keitaro_api_unavailable", "Admin API is unavailable with the current Keitaro license."),
+                403: ("keitaro_forbidden", "Insufficient permissions for this Keitaro request."),
+                404: ("keitaro_not_found", "Object not found in Keitaro."),
+                406: ("keitaro_validation", "Keitaro rejected the object parameters."),
+                422: ("keitaro_validation", "Keitaro rejected the data. Check the supplied fields."),
+                429: ("keitaro_rate_limit", "Too many Keitaro requests. Try again later."),
             }
             if response.status_code >= 500:
                 fallback = (
                     "keitaro_unavailable",
-                    f"Keitaro временно недоступен (HTTP {response.status_code}). Попробуйте позже.",
+                    f"Keitaro is temporarily unavailable (HTTP {response.status_code}). Try again later.",
                 )
             else:
-                fallback = ("keitaro_error", f"Keitaro отклонил запрос (HTTP {response.status_code}).")
+                fallback = ("keitaro_error", f"Keitaro rejected the request (HTTP {response.status_code}).")
             code, message = errors.get(response.status_code, fallback)
             if response.status_code in (400, 406, 422):
                 message = self._validation_message(data, group=path.strip("/") == "groups") or message
@@ -130,7 +130,7 @@ class KeitaroClient:
         if data is None:
             raise KeitaroError(
                 "keitaro_invalid_response",
-                "Keitaro вернул некорректный ответ.",
+                "Keitaro returned an invalid response.",
                 uncertain=mutating,
             )
         return data
@@ -144,13 +144,13 @@ class KeitaroClient:
     async def get_list(self, path: str, **kwargs: Any) -> list[dict[str, Any]]:
         data = await self.request("GET", path, **kwargs)
         if not isinstance(data, list) or not all(isinstance(item, dict) for item in data):
-            raise KeitaroError("keitaro_invalid_response", "Неожиданный формат списка Keitaro.")
+            raise KeitaroError("keitaro_invalid_response", "Unexpected Keitaro list format.")
         return data
 
     async def get_object(self, path: str) -> dict[str, Any]:
         data = await self.request("GET", path)
         if not isinstance(data, dict):
-            raise KeitaroError("keitaro_invalid_response", "Неожиданный формат объекта Keitaro.")
+            raise KeitaroError("keitaro_invalid_response", "Unexpected Keitaro object format.")
         return data
 
     async def create(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -158,7 +158,7 @@ class KeitaroClient:
         if not isinstance(data, dict) or not isinstance(data.get("id"), int):
             raise KeitaroError(
                 "keitaro_invalid_response",
-                "В ответе Keitaro отсутствует ID объекта.",
+                "The Keitaro response does not contain an object ID.",
                 uncertain=True,
             )
         return data
