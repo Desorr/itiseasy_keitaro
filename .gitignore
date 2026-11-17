@@ -1,0 +1,23 @@
+# Local environment and secrets
+.env
+.env.*
+venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.ruff_cache/
+*.db
+*.db-*
+
+# Installed frontend dependencies and generated files
+# Keep frontend/package.json and frontend/package-lock.json in Git.
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+
+# macOS
+.DS_Store
+
+README.md
