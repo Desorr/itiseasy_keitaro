@@ -1,14 +1,17 @@
 # Local environment and secrets
 .env
 .env.*
+# Only placeholder values belong in the shared environment template.
+!.env.example
 venv/
 
 # Python caches
 __pycache__/
 *.py[cod]
-.ruff_cache/
 *.db
 *.db-*
+*.egg-info/
+build/
 
 # Installed frontend dependencies and generated files
 # Keep frontend/package.json and frontend/package-lock.json in Git.
@@ -16,6 +19,23 @@ node_modules/
 dist/
 *.tsbuildinfo
 npm-debug.log*
+
+# Local logs and process files
+*.log
+*.log.*
+*.pid
+
+# Local PostgreSQL data and backups (Compose uses a named volume).
+postgres_data/
+pgdata/
+backups/
+*.dump
+*.backup
+
+# Editor temporary files
+*.swp
+*.swo
+*~
 
 # macOS
 .DS_Store

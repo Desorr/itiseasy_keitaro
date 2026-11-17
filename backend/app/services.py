@@ -1,4 +1,6 @@
+import asyncio
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID
@@ -10,6 +12,13 @@ from .schemas import CampaignCreate, CampaignDeleteRead, CampaignRead
 GOOGLE_URL = "https://google.com"
 UNIQUENESS_METHOD = "ip_ua"
 CAMPAIGN_GROUP_NAME = "test_markovskiy_group"
+
+
+@dataclass
+class CreatedCampaign:
+    campaign: CampaignRead
+    streams: list[dict[str, Any]]
+    offer: dict[str, Any]
 
 
 class CampaignService:
@@ -90,10 +99,11 @@ class CampaignService:
         campaigns = await self.client.get_list("campaigns")
         return next((item for item in campaigns if item.get("alias") == alias), None)
 
-    async def create(self, payload: CampaignCreate, request_id: UUID) -> tuple[CampaignRead, int]:
+    async def create(self, payload: CampaignCreate, request_id: UUID) -> tuple[CreatedCampaign, int]:
         self._require_key()
         alias = f"tm_{request_id.hex[:16]}"
-        domain, source = await self._preflight(payload)
+        domain, source = await self._preflight()
+        offer = {"id": payload.offer_id, "name": payload.offer_name or f"Offer {payload.offer_id}"}
         parameters = self._source_parameters(source)
         group = await self._campaign_group()
         binding = {"domain_id": domain["id"], "group_id": group["id"], "traffic_source_id": source["id"]}
@@ -123,11 +133,12 @@ class CampaignService:
                     "type": "regular", "action_type": "http", "state": "active", "collect_clicks": True,
                     **flow,
                 })
-            await self._verify(campaign_id, alias, payload, expected_state="disabled", binding=binding, domains=[domain])
+            await self._verify(campaign_id, alias, payload, expected_state="disabled", binding=binding, domains=[domain], offer_data=offer)
             await self.client.request("POST", f"campaigns/{campaign_id}/enable")
-            result = await self._verify(campaign_id, alias, payload, expected_state="active", binding=binding, domains=[domain])
+            result = await self._verify(campaign_id, alias, payload, expected_state="active", binding=binding, domains=[domain], offer_data=offer)
             return result, 201
         except KeitaroError as error:
+            self.client.clear_preparation()
             # Reconcile uncertain writes using Keitaro reads; never replay a write.
             if error.uncertain:
                 try:
@@ -136,7 +147,7 @@ class CampaignService:
                         campaign_id = found["id"]
                         if self._managed(found) and found.get("state") == "active":
                             return await self._verify(
-                                campaign_id, alias, payload, expected_state="active", binding=binding, domains=[domain]
+                                campaign_id, alias, payload, expected_state="active", binding=binding, domains=[domain], offer_data=offer
                             ), 200
                 except KeitaroError:
                     pass
@@ -182,11 +193,12 @@ class CampaignService:
             tracking_url=tracking_url, admin_url=self._admin_url(campaign["id"]),
         )
 
-    async def _preflight(self, payload: CampaignCreate) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _preflight(self) -> tuple[dict[str, Any], dict[str, Any]]:
         self._require_key()
-        offer = await self.client.get_object(f"offers/{payload.offer_id}")
-        if offer.get("state") != "active":
-            raise KeitaroError("offer_inactive", "The selected offer is inactive.", http_status=422)
+        domains, sources = await asyncio.gather(
+            self.client.preparation_list("domains"),
+            self.client.preparation_list("traffic_sources"),
+        )
 
         def first_available(items: list[dict[str, Any]], label: str) -> dict[str, Any]:
             item = next((item for item in items if item.get("state", "active") == "active"), None)
@@ -198,23 +210,29 @@ class CampaignService:
                 raise KeitaroError("keitaro_invalid_response", f"{label}: Keitaro returned an invalid ID.")
             return item
 
-        domain = first_available(await self.client.get_list("domains"), "Domain")
-        source = first_available(await self.client.get_list("traffic_sources"), "Traffic source")
+        domain = first_available(domains, "Domain")
+        source = first_available(sources, "Traffic source")
         self._domain_url(domain)
         return domain, source
 
     async def _campaign_group(self) -> dict[str, Any]:
         async def find() -> dict[str, Any] | None:
             groups = await self.client.get_list("groups", params={"type": "campaigns"})
-            return next((group for group in groups
-                         if group.get("name") == CAMPAIGN_GROUP_NAME and group.get("type") == "campaigns"
-                         and group.get("state") != "deleted"), None)
+            for name in ("FORTESTS", CAMPAIGN_GROUP_NAME):
+                group = next((group for group in groups
+                              if group.get("name") == name and group.get("type") == "campaigns"
+                              and group.get("state") != "deleted"), None)
+                if group is not None:
+                    return group
+            return None
 
         group = await find()
         if group is not None:
             return group
         try:
-            return await self.client.create("groups", {"name": CAMPAIGN_GROUP_NAME, "type": "campaigns"})
+            created = await self.client.create("groups", {"name": CAMPAIGN_GROUP_NAME, "type": "campaigns"})
+            self.client.clear_preparation()
+            return created
         except KeitaroError as error:
             # A concurrent request or uncertain write may have created this group.
             # Read once to reconcile; do not repeat POST groups automatically.
@@ -241,10 +259,12 @@ class CampaignService:
 
     async def _verify(
         self, campaign_id: int, alias: str, payload: CampaignCreate, *, expected_state: str, binding: dict[str, int],
-        domains: list[dict[str, Any]] | None = None,
-    ) -> CampaignRead:
-        campaign = await self.client.get_object(f"campaigns/{campaign_id}")
-        streams = await self.client.get_list(f"campaigns/{campaign_id}/streams")
+        domains: list[dict[str, Any]] | None = None, offer_data: dict[str, Any],
+    ) -> CreatedCampaign:
+        campaign, streams = await asyncio.gather(
+            self.client.get_object(f"campaigns/{campaign_id}"),
+            self.client.get_list(f"campaigns/{campaign_id}/streams"),
+        )
         streams = sorted(streams, key=lambda item: item.get("position", 0))
         valid = (
             campaign.get("name") == payload.name
@@ -290,7 +310,10 @@ class CampaignService:
                 "configuration_mismatch", "The saved Keitaro configuration does not match the request."
             )
 
-        return await self._read(campaign, streams=streams, domains=domains)
+        return CreatedCampaign(
+            campaign=await self._read(campaign, streams=streams, domains=domains),
+            streams=streams, offer=offer_data,
+        )
 
     @staticmethod
     def _domain_url(domain: dict[str, Any]) -> str:

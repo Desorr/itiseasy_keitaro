@@ -69,7 +69,6 @@ export default function CampaignEditor({ campaignId, onBack, onBusy }: Props) {
     {hasLoaded && !loading && !error && streams.length === 0 && <p className="muted">This campaign has no flows.</p>}
     {orderedStreams.map((stream) => {
       const blocked = busy || loading || stream.publication !== 'idle'
-      const activeCount = stream.offers.filter((offer) => !offer.removed && offer.state === 'active').length
       return <article key={stream.id} className={`stream-card${stream.dirty ? ' dirty' : ''}`}>
         <h2>{stream.name || `Flow ${stream.position}`} <small>ID {stream.id}</small></h2>
         {stream.missing && <p className="notice error">This flow was deleted in Keitaro. Cancel the draft and fetch flows again.</p>}
@@ -95,8 +94,7 @@ export default function CampaignEditor({ campaignId, onBack, onBusy }: Props) {
                 onClick={() => void change(stream, 'toggle_pin', offer.offer_id)}>
                 {offer.pinned ? 'Unpin' : 'Pin'}</button>}
             </div>
-            <button type="button" className="secondary" disabled={blocked || stream.conflict || !stream.editable || (!offer.removed && offer.state === 'active' && activeCount <= 1)}
-              title={!offer.removed && offer.state === 'active' && activeCount <= 1 ? 'The last active offer cannot be removed' : undefined}
+            <button type="button" className="secondary" disabled={blocked || stream.conflict || !stream.editable}
               onClick={() => void change(stream, offer.removed ? 'restore' : 'remove', offer.offer_id)}>
               {offer.removed ? 'Bring back' : 'Remove'}</button>
           </li>)}

@@ -47,17 +47,30 @@ export default function App() {
   const [editing, setEditing] = useState(false)
   const [loadingCampaigns, setLoadingCampaigns] = useState(true)
   const [campaignsError, setCampaignsError] = useState('')
+  const [syncingCampaigns, setSyncingCampaigns] = useState(false)
+  const campaignVersion = useRef(0)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const locked = busy || loadingCampaigns || requestId !== null
   const creating = showForm || campaigns.length === 0
   const selectedCampaign = campaigns.find((campaign) => campaign.id === selectedId) || campaigns[0]
 
-  async function loadCampaigns(signal?: AbortSignal) {
-    setLoadingCampaigns(true)
+  async function loadCampaigns(signal?: AbortSignal, initial = false) {
+    const version = ++campaignVersion.current
+    setSyncingCampaigns(true)
+    if (initial) setLoadingCampaigns(true)
     setCampaignsError('')
     try {
+      if (initial) {
+        try {
+          const cached = await request<Campaign[]>('/api/campaigns', { signal })
+          if (signal?.aborted || version !== campaignVersion.current) return
+          setCampaigns(cached)
+        } catch { /* Synchronization below can recover a failed database read. */ }
+        if (signal?.aborted || version !== campaignVersion.current) return
+        setLoadingCampaigns(false)
+      }
       const data = await request<Campaign[]>('/api/campaigns/sync', { method: 'POST', signal })
-      if (signal?.aborted) return
+      if (signal?.aborted || version !== campaignVersion.current) return
       setCampaigns(data)
       setConfirmingDelete(false)
       if (requestId) {
@@ -74,19 +87,19 @@ export default function App() {
         }
       }
     } catch (error) {
-      if (!signal?.aborted) {
+      if (!signal?.aborted && version === campaignVersion.current) {
         setCampaignsError(error instanceof Error ? error.message : 'Failed to load campaigns.')
         try {
           const cached = await request<Campaign[]>('/api/campaigns', { signal })
-          if (!signal?.aborted) setCampaigns(cached)
+          if (!signal?.aborted && version === campaignVersion.current) setCampaigns(cached)
         } catch { /* Keep the synchronization error. */ }
       }
-    } finally { if (!signal?.aborted) setLoadingCampaigns(false) }
+    } finally { if (!signal?.aborted) { setLoadingCampaigns(false); setSyncingCampaigns(false) } }
   }
 
   useEffect(() => {
     const controller = new AbortController()
-    void loadCampaigns(controller.signal)
+    void loadCampaigns(controller.signal, true)
     return () => controller.abort()
   }, [])
 
@@ -101,6 +114,12 @@ export default function App() {
     return () => controller.abort()
   }, [])
 
+  useEffect(() => {
+    void request<{ ready: boolean }>('/api/campaigns/preparation').catch(() => {
+      // Optional warmup; creation reports any preparation errors.
+    })
+  }, [])
+
   const offers = useMemo(() => {
     const needle = (selectedOffer ? String(selectedOffer.id) : offerText).trim().toLocaleLowerCase()
     return (allOffers || [])
@@ -110,19 +129,42 @@ export default function App() {
       .slice(0, 30)
   }, [allOffers, offerText, selectedOffer])
 
-  async function loadOffers() {
-    if (allOffers !== null) return
+  useEffect(() => {
+    if (!creating) return
+    const controller = new AbortController()
+    setAllOffers(null)
+    setSelectedOffer(null)
+    setActiveIndex(-1)
+    void loadOffers(controller.signal, true)
+    return () => controller.abort()
+  }, [creating])
+
+  async function loadOffers(signal?: AbortSignal, force = false): Promise<Offer[] | null> {
+    if (!force && allOffers !== null) return allOffers
+    if (!force && offersRequest.current) {
+      try { return await offersRequest.current } catch { return null }
+    }
     setLoadingOffers(true)
     setOfferError('')
+    const pendingRequest = loadAvailableOffers(signal)
+    offersRequest.current = pendingRequest
     try {
-      offersRequest.current ??= loadAvailableOffers()
-      const data = await offersRequest.current
+      const data = await pendingRequest
+      if (signal?.aborted || offersRequest.current !== pendingRequest) return null
       setAllOffers(data)
       setActiveIndex(-1)
+      return data
     } catch (error) {
-      offersRequest.current = null
-      setOfferError(error instanceof Error ? error.message : 'Failed to load offers. Focus the field again to retry.')
-    } finally { setLoadingOffers(false) }
+      if (!signal?.aborted && offersRequest.current === pendingRequest) {
+        setOfferError(error instanceof Error ? error.message : 'Failed to load offers. Try again.')
+      }
+      return null
+    } finally {
+      if (offersRequest.current === pendingRequest) {
+        offersRequest.current = null
+        if (!signal?.aborted) setLoadingOffers(false)
+      }
+    }
   }
 
   function pickOffer(offer: Offer) {
@@ -140,6 +182,15 @@ export default function App() {
   }, [confirmingDelete])
 
   function handleOfferKey(event: KeyboardEvent<HTMLInputElement>) {
+    if (selectedOffer && (event.key === 'Backspace' || event.key === 'Delete')) {
+      event.preventDefault()
+      setSelectedOffer(null)
+      setOfferText('')
+      clearFieldError('offer_id')
+      setFocused(true)
+      setActiveIndex(-1)
+      return
+    }
     if (event.key === 'Escape') { setFocused(false); return }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
@@ -171,21 +222,21 @@ export default function App() {
       document.getElementById(errors.name ? 'campaign-name' : errors.geo_code ? 'geo' : 'offer')?.focus()
       return
     }
+    campaignVersion.current += 1
     setBusy(true)
-    if (allOffers === null) await loadOffers()
-    let availableOffers = allOffers
-    try { availableOffers ??= await offersRequest.current } catch { /* loadOffers displays the error. */ }
+    const availableOffers = allOffers ?? await loadOffers()
     if (!availableOffers || !availableOffers.some((offer) => offer.id === offerId)) {
       setBusy(false)
       setFieldErrors({ offer_id: availableOffers ? 'This offer ID is not in the available offers list.' : 'Failed to verify the offer. Reload the list.' })
       document.getElementById('offer')?.focus()
       return
     }
-    const payload: CampaignInput = { name: name.trim(), geo_code: geoCode, offer_id: offerId }
+    const payload: CampaignInput = { name: name.trim(), geo_code: geoCode, offer_id: offerId, offer_name: selectedOffer!.name }
     const id = crypto.randomUUID()
     try { sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ id, payload })) } catch { /* Optional recovery. */ }
     setRequestId(id)
     setError('')
+    campaignVersion.current += 1
     setBusy(true)
     setFocused(false)
     try {
@@ -208,6 +259,21 @@ export default function App() {
     } finally { setBusy(false) }
   }
 
+  function clearCreationForm() {
+    setName('')
+    setGeo('')
+    setOfferText('')
+    setSelectedOffer(null)
+    setAllOffers(null)
+    setFieldErrors({})
+    setOfferError('')
+    setError('')
+    setFocused(false)
+    setActiveIndex(-1)
+    setLoadingOffers(false)
+    offersRequest.current = null
+  }
+
   function reset() {
     setFieldErrors({})
     setRequestId(null)
@@ -226,6 +292,7 @@ export default function App() {
   async function deleteCampaign() {
     if (!selectedCampaign || busy) return
     const campaign = selectedCampaign
+    campaignVersion.current += 1
     setBusy(true)
     setError('')
     try {
@@ -253,17 +320,20 @@ export default function App() {
   return (
     <main className="with-campaigns">
       <aside className="campaign-sidebar">
-        <h2>My campaigns</h2>
-        <button type="button" className="secondary refresh-campaigns" disabled={busy || loadingCampaigns}
-          onClick={() => void loadCampaigns()}>Refresh</button>
+        <div className="campaign-sidebar-header">
+          <h2>My campaigns</h2>
+          <button type="button" className="secondary refresh-campaigns" disabled={busy || loadingCampaigns || syncingCampaigns}
+            onClick={() => void loadCampaigns()}>Refresh</button>
+        </div>
         {loadingCampaigns && <p className="muted" role="status">Loading campaigns…</p>}
+        {!loadingCampaigns && syncingCampaigns && <p className="muted" role="status">Syncing with Keitaro…</p>}
         {campaignsError && <p className="notice error" role="alert">{campaignsError}</p>}
         <nav aria-label="My campaigns">
           {campaigns.map((campaign) => <button key={campaign.id} type="button"
             className={`campaign-item ${!creating && selectedCampaign?.id === campaign.id ? 'selected' : ''}`}
             aria-current={!creating && selectedCampaign?.id === campaign.id ? 'page' : undefined}
             disabled={busy || loadingCampaigns}
-            onClick={() => { setSelectedId(campaign.id); setShowForm(false); setEditing(false); setError(''); setConfirmingDelete(false) }}>
+            onClick={() => { clearCreationForm(); setSelectedId(campaign.id); setShowForm(false); setEditing(false); setConfirmingDelete(false) }}>
             <span>{campaign.name}</span>
             <small>ID {campaign.id}</small>
           </button>)}
@@ -295,13 +365,12 @@ export default function App() {
         }}>
           <input id="offer" role="combobox" aria-autocomplete="list" aria-expanded={focused && !locked}
             aria-controls="offer-list" aria-activedescendant={activeIndex >= 0 && offers[activeIndex] ? `offer-${offers[activeIndex].id}` : undefined}
-            value={offerText} onChange={(event) => { setOfferText(event.target.value.replace(/[^0-9]/g, '')); setSelectedOffer(null); clearFieldError('offer_id'); setFocused(true); setActiveIndex(-1) }}
+            value={offerText} onChange={(event) => { setOfferText(selectedOffer ? '' : event.target.value.replace(/[^0-9]/g, '')); setSelectedOffer(null); clearFieldError('offer_id'); setFocused(true); setActiveIndex(-1) }}
             onFocus={() => { setFocused(true); void loadOffers() }} onKeyDown={handleOfferKey}
             aria-invalid={Boolean(fieldErrors.offer_id)} aria-describedby={fieldErrors.offer_id ? 'offer-error' : undefined}
             required disabled={locked} placeholder="Enter offer ID" inputMode="numeric" autoComplete="off" />
           {focused && !locked && <div className="suggestions">
             {loadingOffers && <p role="status">Loading offers…</p>}
-            {offerError && <p role="alert">{offerError}</p>}
             {!loadingOffers && !offerError && offers.length === 0 && <p>No offers found.</p>}
             <div id="offer-list" role="listbox" aria-label="Available offers">
               {offers.map((offer, index) => <button key={offer.id} id={`offer-${offer.id}`} type="button" role="option"
@@ -317,6 +386,10 @@ export default function App() {
             </div>
           </div>}
         </div>
+        {offerError && <div className="field-error" role="alert">
+          {offerError} <button type="button" className="secondary" disabled={locked || loadingOffers}
+            onClick={() => void loadOffers(undefined, true)}>Retry</button>
+        </div>}
         {fieldErrors.offer_id && <small id="offer-error" className="field-error" role="alert">{fieldErrors.offer_id}</small>}
         {error && <p className="notice error" role="alert">{error}</p>}
           <div className="actions">
@@ -324,7 +397,7 @@ export default function App() {
               {busy ? 'Creating…' : 'Create campaign'}
             </button>
             {requestId && !busy && <>
-              <button type="button" className="secondary" disabled={loadingCampaigns} onClick={() => void loadCampaigns()}>Refresh campaign list</button>
+              <button type="button" className="secondary" disabled={busy || loadingCampaigns || syncingCampaigns} onClick={() => void loadCampaigns()}>Refresh campaign list</button>
               <button type="button" className="secondary" onClick={reset}>New campaign</button>
             </>}
           </div>
@@ -340,8 +413,6 @@ export default function App() {
           <h2>{selectedCampaign.state === 'active' ? 'Campaign active' : 'Campaign disabled'}</h2>
           <p>Campaign ID: <strong>{selectedCampaign.id}</strong></p>
           {selectedCampaign.state !== 'active' && <p>Check the campaign configuration in Keitaro before enabling it.</p>}
-          <p className="muted">GEO: {selectedCampaign.geo_code || '—'} · Offers: {selectedCampaign.offer_ids.join(', ') || '—'}</p>
-          {fieldErrors.offer_id && <small id="offer-error" className="field-error" role="alert">{fieldErrors.offer_id}</small>}
         {error && <p className="notice error" role="alert">{error}</p>}
           <div className="actions">
             <button type="button" disabled={busy || loadingCampaigns}

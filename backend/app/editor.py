@@ -9,8 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .config import Settings
 from .database import Campaign, Offer, Stream, StreamOffer
 from .keitaro import KeitaroClient, KeitaroError
-from .schemas import CampaignRead, DraftInput, StreamRead
-from .services import CampaignService
+from .schemas import CampaignSummary, DraftInput, StreamRead
+from .services import CampaignService, CreatedCampaign
 
 
 def reject(code: str, message: str, status: int = 422):
@@ -40,7 +40,10 @@ def outgoing(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def distribute(rows: list[dict[str, Any]]) -> None:
     active = [row for row in rows if not row["removed"] and row["state"] == "active"]
     if not active:
-        reject("last_offer", "The flow must have at least one active offer.")
+        for row in rows:
+            row["share"] = 0
+            row["pinned"] = False
+        return
     pinned = [row for row in active if row["pinned"]]
     free = [row for row in active if not row["pinned"]]
     remainder = 100 - sum(row["share"] for row in pinned)
@@ -219,7 +222,7 @@ class EditorService:
     async def list_campaigns(self):
         async with self.sessions() as db:
             campaigns = (await db.scalars(select(Campaign).where(Campaign.state != "deleted").order_by(Campaign.id.desc()))).all()
-            return [CampaignRead.model_validate(item.data) for item in campaigns]
+            return [CampaignSummary.model_validate(item.data) for item in campaigns]
 
     async def sync_campaigns(self):
         self.campaigns._require_key()
@@ -237,6 +240,27 @@ class EditorService:
                     item.state = "deleted"
                     item.data = {**item.data, "state": "deleted"}
         return await self.list_campaigns()
+
+    async def save_created(self, created: CreatedCampaign):
+        """Persist the verified creation snapshot without additional Keitaro reads."""
+        campaign = created.campaign
+        async with self.sessions.begin() as db:
+            await db.execute(text("SELECT pg_advisory_xact_lock(71120401)"))
+            inserted = await db.scalar(insert(Campaign).values(
+                id=campaign.id, alias=campaign.alias, state=campaign.state,
+                data=campaign.model_dump(),
+            ).on_conflict_do_nothing(index_elements=[Campaign.id]).returning(Campaign.id))
+            if inserted is None:
+                # A concurrent import already saved a newer view; do not overwrite it.
+                return
+            await self._remember_offer(db, int(created.offer["id"]), created.offer)
+            for raw in created.streams:
+                stream = Stream(id=raw["id"], campaign_id=campaign.id, name=raw.get("name", ""),
+                                position=raw.get("position", 0), schema=raw.get("schema", ""), confirmed={},
+                                revision=1, missing=False, conflict=False, publication="idle")
+                db.add(stream)
+                await db.flush()
+                await self._ingest(db, stream, raw)
 
     async def sync_campaign(self, campaign_id: int):
         async with self.sessions.begin() as db:
@@ -375,7 +399,7 @@ class EditorService:
                 rows = stream.draft
                 distribute(deepcopy(rows))
                 active = [row for row in rows if not row["removed"] and row["state"] == "active"]
-                if not active or sum(row["share"] for row in active) != 100:
+                if active and sum(row["share"] for row in active) != 100:
                     reject("invalid_shares", "Active offer shares must total 100%.")
                 old_ids = {item["offer_id"] for item in stream.confirmed["offers"]}
                 for row in rows:

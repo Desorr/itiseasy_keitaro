@@ -1,20 +1,11 @@
-export type CampaignInput = { name: string; geo_code: string; offer_id: number }
+export type CampaignInput = { name: string; geo_code: string; offer_id: number; offer_name?: string }
 export type Offer = { id: number; name: string }
 export type Campaign = {
   id: number
   name: string
   alias: string
   state: string
-  domain_id: number | null
-  group_id: number | null
-  traffic_source_id: number | null
-  geo_code: string | null
-  offer_id: number | null
-  offer_ids: number[]
-  google_stream_id: number | null
-  offer_stream_id: number | null
-  tracking_url: string | null
-  admin_url: string
+
 }
 
 export class ApiError extends Error {
@@ -55,11 +46,6 @@ export type Stream = {
 }
 export type DraftAction = 'add' | 'remove' | 'restore' | 'toggle_pin'
 
-let availableOffers: Promise<Offer[]> | null = null
-export function loadAvailableOffers(): Promise<Offer[]> {
-  availableOffers ??= request<Offer[]>('/api/offers').catch((error: unknown) => {
-    availableOffers = null
-    throw error
-  })
-  return availableOffers
+export function loadAvailableOffers(signal?: AbortSignal): Promise<Offer[]> {
+  return request<Offer[]>('/api/offers', { signal, cache: 'no-store' })
 }

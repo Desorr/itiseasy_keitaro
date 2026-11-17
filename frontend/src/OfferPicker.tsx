@@ -26,6 +26,14 @@ export default function OfferPicker({ disabled, value, onChange, error }: Props)
   }
   function pick(offer: Offer) { onChange(offer); setText(''); setOpen(false); setActive(-1) }
   function keydown(event: KeyboardEvent<HTMLInputElement>) {
+    if (value && (event.key === 'Backspace' || event.key === 'Delete')) {
+      event.preventDefault()
+      onChange(null)
+      setText('')
+      setOpen(true)
+      setActive(-1)
+      return
+    }
     if (event.key === 'Escape') setOpen(false)
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
@@ -43,7 +51,7 @@ export default function OfferPicker({ disabled, value, onChange, error }: Props)
       disabled={disabled} value={value ? `[${value.id}] ${value.name}` : text}
       placeholder="Enter offer ID" inputMode="numeric" autoComplete="off"
       aria-invalid={Boolean(error)} aria-describedby={error ? `${id}-error` : undefined}
-      onChange={(event) => { setText(event.target.value.replace(/[^0-9]/g, '')); onChange(null); setOpen(true); setActive(-1) }}
+      onChange={(event) => { setText(value ? '' : event.target.value.replace(/[^0-9]/g, '')); onChange(null); setOpen(true); setActive(-1) }}
       onFocus={() => void focus()} onKeyDown={keydown} />
     {open && !disabled && <div className="suggestions">
       {loading && <p role="status">Loading offers…</p>}

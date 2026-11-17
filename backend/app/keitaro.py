@@ -1,4 +1,6 @@
+import asyncio
 import logging
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -20,6 +22,8 @@ class KeitaroError(Exception):
 
 class KeitaroClient:
     def __init__(self, settings: Settings, transport: httpx.AsyncBaseTransport | None = None):
+        self._preparation_cache: dict[tuple, tuple[float, list[dict[str, Any]]]] = {}
+        self._preparation_locks: dict[tuple, asyncio.Lock] = {}
         self.client = httpx.AsyncClient(
             base_url=f"{settings.keitaro_base_url}/admin_api/v1/",
             headers={
@@ -31,6 +35,21 @@ class KeitaroClient:
             follow_redirects=False,
             transport=transport,
         )
+
+    async def preparation_list(self, path: str, *, params: dict[str, str] | None = None) -> list[dict[str, Any]]:
+        """Short-lived reference data cache shared by warmup and creation requests."""
+        key = (path, tuple(sorted((params or {}).items())))
+        lock = self._preparation_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = self._preparation_cache.get(key)
+            if cached is not None and monotonic() - cached[0] < 60:
+                return cached[1]
+            rows = await self.get_list(path, params=params) if params else await self.get_list(path)
+            self._preparation_cache[key] = (monotonic(), rows)
+            return rows
+
+    def clear_preparation(self) -> None:
+        self._preparation_cache.clear()
 
     async def aclose(self) -> None:
         await self.client.aclose()
