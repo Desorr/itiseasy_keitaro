@@ -1,28 +1,23 @@
 import { useId, useMemo, useState } from 'react'
 import type { KeyboardEvent } from 'react'
-import { loadAvailableOffers } from './api'
 import type { Offer } from './api'
 
-type Props = { disabled: boolean; value: Offer | null; onChange: (offer: Offer | null) => void; error?: string }
+type Props = {
+  disabled: boolean; value: Offer | null; onChange: (offer: Offer | null) => void; error?: string
+  all: Offer[]; loading: boolean; loadError: string; onLoad: () => void
+}
 
-export default function OfferPicker({ disabled, value, onChange, error }: Props) {
+export default function OfferPicker({ disabled, value, onChange, error, all, loading, loadError, onLoad }: Props) {
   const id = useId()
   const [text, setText] = useState('')
-  const [all, setAll] = useState<Offer[]>([])
   const [open, setOpen] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [loadError, setLoadError] = useState('')
   const [active, setActive] = useState(-1)
   const offers = useMemo(() => all.filter((offer) => String(offer.id).includes(value ? String(value.id) : text))
     .sort((a, b) => Number(String(b.id) === text) - Number(String(a.id) === text) || a.name.localeCompare(b.name)).slice(0, 30), [all, text, value])
 
-  async function focus() {
+  function focus() {
     setOpen(true)
-    setLoading(true)
-    setLoadError('')
-    try { setAll(await loadAvailableOffers()) } catch (error) {
-      setLoadError(error instanceof Error ? error.message : 'Failed to load offers.')
-    } finally { setLoading(false) }
+    onLoad()
   }
   function pick(offer: Offer) { onChange(offer); setText(''); setOpen(false); setActive(-1) }
   function keydown(event: KeyboardEvent<HTMLInputElement>) {

@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { ApiError, request } from './api'
+import { useRef, useState } from 'react'
+import { ApiError, loadAvailableOffers, request } from './api'
 import type { DraftAction, Offer, Stream } from './api'
 import OfferPicker from './OfferPicker'
 
@@ -14,9 +14,27 @@ export default function CampaignEditor({ campaignId, onBack, onBusy }: Props) {
   const [errors, setErrors] = useState<Record<number, string>>({})
   const [picked, setPicked] = useState<Record<number, Offer | null>>({})
   const [offerErrors, setOfferErrors] = useState<Record<number, string>>({})
+  const [availableOffers, setAvailableOffers] = useState<Offer[]>([])
+  const [offersLoading, setOffersLoading] = useState(false)
+  const [offersLoadError, setOffersLoadError] = useState('')
+  const offersStatus = useRef<'idle' | 'loading' | 'loaded'>('idle')
   const base = `/api/campaigns/${campaignId}/streams`
   const orderedStreams = [...streams].sort((a, b) => Number(b.offers.length > 0) - Number(a.offers.length > 0)
     || a.position - b.position || a.id - b.id)
+
+  async function loadOffers() {
+    if (offersStatus.current !== 'idle') return
+    offersStatus.current = 'loading'
+    setOffersLoading(true)
+    setOffersLoadError('')
+    try {
+      setAvailableOffers(await loadAvailableOffers())
+      offersStatus.current = 'loaded'
+    } catch (error) {
+      offersStatus.current = 'idle'
+      setOffersLoadError(error instanceof Error ? error.message : 'Failed to load offers.')
+    } finally { setOffersLoading(false) }
+  }
 
   async function refresh() {
     setBusy(true); setLoading(true); onBusy(true); setError(''); setErrors({})
@@ -101,6 +119,7 @@ export default function CampaignEditor({ campaignId, onBack, onBusy }: Props) {
         </ul>}
         {stream.editable && <div className="editor-add-offer">
           <OfferPicker disabled={blocked || stream.conflict} value={picked[stream.id] ?? null} error={offerErrors[stream.id]}
+            all={availableOffers} loading={offersLoading} loadError={offersLoadError} onLoad={() => void loadOffers()}
             onChange={(offer) => { setPicked((current) => ({ ...current, [stream.id]: offer })); setOfferErrors((current) => ({ ...current, [stream.id]: '' })) }} />
           <button type="button" disabled={blocked || stream.conflict} onClick={() => void change(stream, 'add')}>Add</button>
         </div>}
